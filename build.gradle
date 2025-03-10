@@ -1,0 +1,90 @@
+// Example gradle script to show how a bug tracker plugin can be built
+import aQute.bnd.gradle.Bundle
+
+plugins {
+    id "java"
+    id "biz.aQute.bnd.builder" version "6.4.0"
+}
+
+compileJava {
+    sourceCompatibility = 8
+    targetCompatibility = 8
+    options.release.set 8
+}
+
+version = '24.4.0.0008'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    compileOnly fileTree(dir: 'lib', include: 'fortify-public*.jar')
+    implementation(group: 'org.apache.httpcomponents', name: 'httpclient', version: '4.5.14')
+    implementation(group: 'org.apache.httpcomponents', name: 'httpmime', version: '4.5.13')
+    implementation(group: 'org.apache.httpcomponents', name: 'httpcore', version: '4.4.16')
+    implementation(group: 'commons-codec', name: 'commons-codec', version: '1.15')
+    implementation(group: 'commons-logging', name: 'commons-logging', version: '1.2')
+    implementation(group: 'commons-lang', name: 'commons-lang', version: '2.4')
+
+    implementation("jakarta.xml.bind:jakarta.xml.bind-api:2.3.2")
+    modules {
+        module("javax.xml.bind:jaxb-api") {
+            replacedBy("jakarta.xml.bind:jakarta.xml.bind-api", "artifact was moved")
+        }
+    }
+    runtimeOnly("com.sun.activation:jakarta.activation:1.2.1")
+    runtimeOnly("org.glassfish.jaxb:jaxb-runtime:2.2.11")
+}
+
+jar.enabled = false // We don't need to generate a default non-osgi jar during build
+
+clean {
+    delete "${projectDir}/dist"
+}
+
+def bundleClassPath() {
+    def list = ['.']
+    configurations.runtimeClasspath.findAll {
+        !it.name.contains('source-') && !it.name.contains('javadoc-')
+    }.sort{ it.name }.each {
+        list += 'lib/' + it.name
+    }
+    return list.join(',')
+}
+
+def pluginJarTask = tasks.register('pluginJar', Bundle) {
+    dependsOn(tasks.named("classes"))
+    archiveBaseName.set "com.fortify.sample.BugTrackerPluginAlm"
+    doFirst {
+        bnd(
+                '-fixupmessages': '"Classes found in the wrong directory"; restrict:=error; is:=warning', // workaround for multi-release jar incompatibility in jakarta.xml.bind-api
+
+                'Bundle-Name': '%Bundle-Name',
+                'Bundle-Vendor': '%Bundle-Vendor',
+                'Bundle-ActivationPolicy': 'lazy',
+                'Bundle-Localization': 'plugin',
+                'Bundle-RequiredExecutionEnvironment': 'JavaSE-1.8',
+                'Built-By': 'Fortify',
+                'Version': project.version,
+                'Bundle-ClassPath': bundleClassPath(),
+                'Bundle-SymbolicName': 'com.hp.fortify.BugTrackerPluginAlm;singleton:=true',
+                'Bundle-Version': project.version,
+                'Require-Bundle': 'com.fortify.common.public-api',    // Needed by AWB
+                'Import-Package': '!*',   // ..suppress the bndTools default import generation
+                'Export-Package': ['com.fortify.sample.bugtracker.alm', 'com.fortify.sample.bugtracker.alm.infra'].join(','),
+        )
+    }
+    from sourceSets.main.output
+    destinationDirectory.set file("${projectDir}/dist")
+    from(projectDir) {
+        include "plugin.properties"
+        include "plugin.xml"
+    }
+    into("lib") {
+        from configurations.runtimeClasspath.files
+        include "*.jar"
+    }
+}
+
+build.dependsOn(pluginJarTask)
