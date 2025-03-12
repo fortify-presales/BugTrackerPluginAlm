@@ -75,6 +75,7 @@ import org.apache.http.message.BasicHeader;
 import org.apache.http.util.EntityUtils;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import org.xml.sax.InputSource;
@@ -194,6 +195,7 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
     private static final String DEV_COMMENTS_FIELD_NAME = "dev-comments";
     private static final String DESCRIPTION_FIELD_NAME = "description";
     private static final String DETECTED_IN_BUILD_FIELD_NAME = "build-detected";
+    private static final String DETECTED_IN_RELEASE_FIELD_NAME = "detected-in-rel";
     private static final String CAUSED_BY_CHANGESET_FIELD_NAME = "changeset";
     private static final String NAME_FIELD_NAME = "name";
     private static final String CREATION_TIME_FIELD_NAME = "creation-time";
@@ -211,6 +213,7 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
     private static final String SUMMARY_PARAM_NAME = "summary";
     private static final String NAME_PARAM_NAME = "name";
     private static final String DESCRIPTION_PARAM_NAME = "description";
+    private static final String DETECTED_IN_RELEASE_PARAM_NAME = "detected-in-rel";
 
     private static final Charset CHARSET_UTF8 = Charset.forName("UTF-8");
 
@@ -556,7 +559,8 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
             createDefect.addHeader("Accept", "application/xml");
 
             final String defectXmlString = constructDefectXmlString(bugSubmission, detectedInBuildInstance, candidateChangesets, credentials.getUserName(),
-                    getAttributeNameForEntity(DEFECT_ENTITY_TYPE_NAME, CATEGORY_LABEL_NAME, domainName, projectName, client, hcc));
+                    getAttributeNameForEntity(DEFECT_ENTITY_TYPE_NAME, CATEGORY_LABEL_NAME, domainName, projectName, client, hcc),
+                    client, hcc, domainName, projectName);
 
             createDefect.setEntity(new StringEntity(defectXmlString, ContentType.create("application/xml", CHARSET_UTF8)));
 
@@ -676,7 +680,7 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
                     final NodeList nodes = (NodeList) xpath.compile("/Fields/Field").evaluate(doc, XPathConstants.NODESET);
                     for (int i = 0; i < nodes.getLength(); i++) {
                         BugParam bugParam;
-                        String type = "", listId = "";
+                        String type = "", listId = "", referencedEntityType = "", relationName = "";
                         boolean required = false;
                         int size = 0;
                         Element field = (Element) nodes.item(i);
@@ -696,6 +700,13 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
                                 size = Integer.parseInt(childNode.getTextContent());
                             } else if (childNode.getNodeName().equals("List-Id")) {
                                 listId = childNode.getTextContent();
+                            } else if (childNode.getNodeName().equals("References")) {
+                                if (childNode.getNodeType() == Node.ELEMENT_NODE) {
+                                    Element element = (Element) childNode;
+                                    NamedNodeMap attributes = element.getElementsByTagName("RelationReference").item(0).getAttributes();
+                                    referencedEntityType = attributes.getNamedItem("ReferencedEntityType").getTextContent();
+                                    relationName = attributes.getNamedItem("RelationName").getTextContent();
+                                }
                             }
                         }
                         if (required || "description".equals(identifier)) {
@@ -726,6 +737,37 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
                                 } else {
                                     // add descriptionParam and summaryParam later
                                     bugParams.add(bugParam);
+                                }
+                            } else if (type.equalsIgnoreCase("reference")) {
+                                HttpGet relationsQuery = getRelationsQuery(domain, project, referencedEntityType);
+                                Response relationsresp = runQueryInContext(client, hcc, relationsQuery);
+                                int relationsHttpReturnCode = relationsresp.getResponseStatus();
+                                String relationsResponse = relationsresp.getResponseBody();
+                                switch (relationsHttpReturnCode) {
+                                    case HttpURLConnection.HTTP_OK:
+                                        final Document relationsDoc = relationsresp.getDocument();
+                                        final XPath relationsXpath = xpathFactory.newXPath();
+                                        final NodeList choices = (NodeList) relationsXpath.compile("/Entities/Entity/Fields/Field[@Name = 'name']").evaluate(relationsDoc,
+                                                XPathConstants.NODESET);
+                                        List<String> choiceList = new ArrayList<>();
+                                        for (int l = 0; l < choices.getLength(); l++) {
+                                            Element itemElem = (Element) choices.item(l);
+                                            Element valueElem = (Element) itemElem.getElementsByTagName("Value").item(0);
+                                            String value = valueElem.getTextContent();
+                                            choiceList.add(value);
+                                        }
+                                        LOG.warn(String.format("Setting relations identifier %s choice list to: %s", identifier, choiceList));
+                                        bugParam = new BugParamChoice().setChoiceList(choiceList);
+                                        bugParam.setDisplayLabel(displayName);
+                                        bugParam.setIdentifier(identifier);
+                                        bugParam.setRequired(required);
+                                        bugParam.setMaxLength(size);
+                                        bugParams.add(bugParam);
+                                        break;
+                                    default:
+                                        RuntimeException nested = new RuntimeException("Got HTTP return code: " + relationsHttpReturnCode + "; Response: "
+                                                + relationsResponse);
+                                        throw new BugTrackerException("Could not query references from the ALM server", nested);
                                 }
                             } else if (type.equalsIgnoreCase("lookuplist")) {
                                 HttpGet listQuery = getLookupListQuery(domain, project, listId, ALMApiVersion.VER_11);
@@ -763,7 +805,7 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
                                     default:
                                         RuntimeException nested = new RuntimeException("Got HTTP return code: " + listHttpReturnCode + "; Response: "
                                                 + listResponse);
-                                        throw new BugTrackerException("Could not query comments from the ALM server", nested);
+                                        throw new BugTrackerException("Could not query lists from the ALM server", nested);
                                 }
                             } else if (type.equalsIgnoreCase("date") && !CREATION_TIME_FIELD_NAME.equals(identifier)) {
                                 bugParam = new BugParamText();
@@ -802,7 +844,7 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
                     break;
                 default:
                     RuntimeException nested = new RuntimeException("Got HTTP return code: " + httpReturnCode + "; Response: " + response);
-                    throw new BugTrackerException("Could not query default bug fields from the ALM server", nested);
+                    throw new BugTrackerException(String.format("Could not query default bug fields from the ALM server: %s - %s", httpReturnCode, response), nested);
             }
 
         } catch (XPathExpressionException e) {
@@ -822,12 +864,21 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
 
         final HttpGet query = new HttpGet(almUrlPrefix + "/qcbin/rest/domains/" + domainName + "/projects/" + projectName + "/customization/" + listsUrl + "?id=" + id);
         query.addHeader("Accept", "application/xml");
+        //LOG.warn(String.format("getLookupListQuery: %s", query.getURI().toString()));
+        return query;
+    }
+
+    private HttpGet getRelationsQuery(final String domainName, final String projectName, final String entity) {
+        final HttpGet query = new HttpGet(almUrlPrefix + "/qcbin/rest/domains/" + domainName + "/projects/" + projectName + "/" + entity + "s"); // is this a bit hacky?
+        query.addHeader("Accept", "application/xml");
+        //LOG.warn(String.format("getRelationsQuery: %s", query.getURI().toString()));
         return query;
     }
 
     private HttpGet createRequestForBugFieldsXML(final String domainName, final String projectName) {
         final HttpGet query = new HttpGet(almUrlPrefix + "/qcbin/rest/domains/" + domainName + "/projects/" + projectName + "/customization/entities/defect/fields");
         query.addHeader("Accept", "application/xml");
+        //LOG.warn(String.format("createRequestForBugFieldsXML: %s", query.getURI().toString()));
         return query;
     }
 
@@ -1239,8 +1290,15 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
         runQueryInContext(client, hcc, deleteSession);
     }
 
-    private String constructDefectXmlString(BugSubmission bug, String detectedInBuildInstanceId
-            , List<String> candidateChangesets, String detectedByUser, String categoryAttributeName) throws Exception {
+    private String constructDefectXmlString(BugSubmission bug, String detectedInBuildInstanceId,
+            List<String> candidateChangesets, String detectedByUser, String categoryAttributeName,
+            final CloseableHttpClient client, final HttpClientContext hcc,
+            final String domain, final String project) throws Exception {
+        
+        // dump all the fields
+        for (String paramName : bug.getParams().keySet()) {
+            LOG.warn(String.format("field: %s = %s", paramName, bug.getParams().get(paramName)));
+        }
 
         final Entity defect = new Entity();
         defect.setType(DEFECT_ENTITY_TYPE_NAME);
@@ -1260,6 +1318,13 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
 
         if (detectedInBuildInstanceId != null && detectedInBuildInstanceId.length() != 0) {
             fields.getField().add(buildEntityField(DETECTED_IN_BUILD_FIELD_NAME, detectedInBuildInstanceId, DEFAULT_TRIM_LENGTH));
+        }
+
+        // convert release name to id
+        if (bug.getParams().get(DETECTED_IN_RELEASE_PARAM_NAME) != null && bug.getParams().get(DETECTED_IN_RELEASE_PARAM_NAME).length() > 0) {
+            fields.getField().add(buildEntityField(DETECTED_IN_RELEASE_FIELD_NAME, 
+                getEntityId(DETECTED_IN_RELEASE_PARAM_NAME, bug.getParams().get(DETECTED_IN_RELEASE_PARAM_NAME), client, hcc, domain, project), 
+                DEFAULT_TRIM_LENGTH));
         }
 
         if (candidateChangesets != null && candidateChangesets.size() == 1) {
@@ -1282,14 +1347,15 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
 
         for (String paramName : bug.getParams().keySet()) {
             if (!(paramName.equals(NAME_PARAM_NAME) || paramName.equals(DESCRIPTION_PARAM_NAME) ||
-                    paramName.equals(PROJECT_PARAM_NAME) || paramName.equals(DOMAIN_PARAM_NAME)
+                    paramName.equals(PROJECT_PARAM_NAME) || paramName.equals(DOMAIN_PARAM_NAME) ||
+                    paramName.equals(DETECTED_IN_RELEASE_PARAM_NAME)
                     || paramName.equals(SEVERITY_PARAM_NAME))) {
                 fields.getField().add(buildEntityField(paramName, bug.getParams().get(paramName), DEFAULT_TRIM_LENGTH));
             }
         }
 
         final String defectXmlString = EntityMarshallingUtils.marshal(Entity.class, defect);
-        LOG.debug("defectXmlString: " + defectXmlString);
+        LOG.warn(String.format("defectXmlString: %s", defectXmlString));
         return defectXmlString;
     }
 
@@ -1647,7 +1713,14 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
     }
 
     private String constructMultiIssueDefectXmlString(MultiIssueBugSubmission bug, String detectedInBuildInstanceId, List<String> candidateChangesets,
-                                                      String detectedByUser, String categoryAttributeName) throws JAXBException {
+                                                     String detectedByUser, String categoryAttributeName,
+                                                     final CloseableHttpClient client, final HttpClientContext hcc,
+                                                     final String domain, final String project) throws JAXBException {
+        
+        // dump all the fields
+        for (String paramName : bug.getParams().keySet()) {
+            LOG.warn(String.format("field: %s = %s", paramName, bug.getParams().get(paramName)));
+        }
 
         final Entity defect = new Entity();
         defect.setType(DEFECT_ENTITY_TYPE_NAME);
@@ -1679,6 +1752,13 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
             fields.getField().add(buildEntityField(DETECTED_IN_BUILD_FIELD_NAME, detectedInBuildInstanceId, DEFAULT_TRIM_LENGTH));
         }
 
+        // convert release name to id
+        if (bug.getParams().get(DETECTED_IN_RELEASE_PARAM_NAME) != null && bug.getParams().get(DETECTED_IN_RELEASE_PARAM_NAME).length() > 0) {
+            fields.getField().add(buildEntityField(DETECTED_IN_RELEASE_FIELD_NAME, 
+                getEntityId(DETECTED_IN_RELEASE_PARAM_NAME, bug.getParams().get(DETECTED_IN_RELEASE_PARAM_NAME), client, hcc, domain, project), 
+                DEFAULT_TRIM_LENGTH));
+        }
+
         if (candidateChangesets != null && candidateChangesets.size() == 1) {
             fields.getField().add(buildEntityField(CAUSED_BY_CHANGESET_FIELD_NAME, candidateChangesets.get(0), DEFAULT_TRIM_LENGTH));
         }
@@ -1700,17 +1780,75 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
 
         for (String paramName : bug.getParams().keySet()) {
             if (!(paramName.equals(NAME_PARAM_NAME) || paramName.equals(DESCRIPTION_PARAM_NAME) ||
-                    paramName.equals(PROJECT_PARAM_NAME) || paramName.equals(DOMAIN_PARAM_NAME)
+                    paramName.equals(PROJECT_PARAM_NAME) || paramName.equals(DOMAIN_PARAM_NAME) ||
+                    paramName.equals(DETECTED_IN_RELEASE_PARAM_NAME)
                     || paramName.equals(SEVERITY_PARAM_NAME))) {
                 fields.getField().add(buildEntityField(paramName, bug.getParams().get(paramName), DEFAULT_TRIM_LENGTH));
             }
         }
 
         final String defectXmlString = EntityMarshallingUtils.marshal(Entity.class, defect);
-        LOG.debug(String.format("defectXmlString: %s", defectXmlString));
+        LOG.warn(String.format("defectXmlString: %s", defectXmlString));
         return defectXmlString;
     }
 
+    // get the id of a named reference field
+    private String getEntityId(final String entityField, final String entityValue,
+        final CloseableHttpClient client, final HttpClientContext hcc,
+        final String domain, final String project) {
+
+        LOG.warn(String.format("Retrieving id for entitiy field %s, value %s", entityField, entityValue));
+
+        String entityName = "";
+        String entityQuery = "";
+        String entityId;
+
+        try {
+            switch (entityField) {
+                case DETECTED_IN_RELEASE_PARAM_NAME:
+                    entityName = "releases";
+                    entityQuery = String.format("{name[=%s]}", entityValue);
+                    break;
+                // Add more entities here as needed
+                default:
+                    LOG.warn(String.format("No mapping to entity for %s/%s", entityName, entityValue));
+            }
+
+            HttpGet query = new HttpGet(almUrlPrefix + "/qcbin/rest/domains/" + domain + "/projects/" + project + "/" + entityName);
+            URI uri = new URIBuilder(query.getURI())
+                .addParameter("query", entityQuery)
+                .addParameter("fields", "id")
+                .build();
+            query.setURI(uri);
+            query.addHeader("Accept", "application/xml");
+
+
+            Response resp = runQueryInContext(client, hcc, query);
+            int httpReturnCode = resp.getResponseStatus();
+            String response = resp.getResponseBody();
+            LOG.warn(String.format("Response: %s", response));
+            final Document doc = resp.getDocument();
+            final XPath xpath = xpathFactory.newXPath();
+            switch (httpReturnCode) {
+                case HttpURLConnection.HTTP_OK:
+                    final NodeList fields = (NodeList) xpath.compile("//Entities/Entity/Fields/Field[@Name='id']").evaluate(doc, XPathConstants.NODESET);
+                    Element fieldElem = (Element) fields.item(0);
+                    Element valueElem = (Element) fieldElem.getElementsByTagName("Value").item(0);
+                    entityId = valueElem.getTextContent();
+                    LOG.warn(String.format("Found entitiy id: %s", entityId));
+                    break;
+                default:
+                    RuntimeException nested = new RuntimeException("Got HTTP return code: " + httpReturnCode + "; Response: " + response);
+                    throw new BugTrackerException(String.format("getEntityId::Could not query entity Id from the ALM server: %s - %s", httpReturnCode, response), nested);
+            }
+
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
+        return entityId;
+
+    }
 
     private Entity.Fields.Field buildEntityField (final String fieldName, final String elementValue, final int trimLength ) {
         Entity.Fields.Field field = new Entity.Fields.Field();
@@ -1789,7 +1927,8 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
             createDefectRequest.addHeader("Accept", "application/xml");
 
             final String defectXmlString = constructMultiIssueDefectXmlString(bugSubmission, detectedInBuildInstance, candidateChangesets, credentials.getUserName(),
-                    getAttributeNameForEntity(DEFECT_ENTITY_TYPE_NAME, CATEGORY_LABEL_NAME, domainName, projectName, client, hcc));
+                    getAttributeNameForEntity(DEFECT_ENTITY_TYPE_NAME, CATEGORY_LABEL_NAME, domainName, projectName, client, hcc),
+                    client, hcc, domainName, projectName);
             createDefectRequest.setEntity(new StringEntity(defectXmlString, ContentType.create("application/xml", "UTF-8")));
 
             Response createDefectResponse = runQueryInContext(client, hcc, createDefectRequest);
