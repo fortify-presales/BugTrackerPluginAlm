@@ -130,3 +130,21 @@ USING IN SSC
 
 Edit your application version profile within Software Security Center and configure/enable bug tracker plugin integration.
 Then you can start filing issues directly from this application version as bugs to the external bug tracker provider.
+
+----------------
+DEBUGGING IN SSC
+----------------
+
+Plugin "Logging" messages will be available in 
+   <SSC_Home_Dir>/plugin-framework/logs/plugin-framework.log
+You can change the logging level in
+   <SSC_Home_Dir>/conf/log4j2.xml
+for example:
+
+...
+   <!-- Plugin framework -->
+   <Logger name="com.fortify.plugin.runtime" level="debug"/>
+   <Logger name="com.fortify.plugin.connector" level="debug"/>
+   <Logger name="com.fortify.manager.plugin" level="debug"/>
+   <Logger name="com.fortify.manager.service.parser.AnalysisParserRegistryImpl" level="debug"/>
+...

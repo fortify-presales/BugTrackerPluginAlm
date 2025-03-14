@@ -670,7 +670,7 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
             }
         }
         final BugParam detectedInReleaseParam = new BugParamChoice().setHasDependentParams(true).setIdentifier(DETECTED_IN_RELEASE_PARAM_NAME).setDisplayLabel("Detected in Release")
-            .setRequired(true).setDescription("Release in which the issue was detected");
+            .setRequired(false).setDescription("Release in which the issue was detected");
         bugParams.add(detectedInReleaseParam);
         if (!StringUtils.isEmpty(project)) {
             final List<String> releases = getReleases(issueDetail, client, hcc, domain, project);
@@ -678,14 +678,29 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
 
         }
         final BugParam detectedInReleaseCycleParam = new BugParamChoice().setHasDependentParams(false).setIdentifier(DETECTED_IN_RELEASE_CYCLE_PARAM_NAME).setDisplayLabel("Detected in Release Cycle")
-            .setRequired(true).setDescription("Release cycle in which the issue was detected");
+            .setRequired(false).setDescription("Release cycle in which the issue was detected");
         bugParams.add(detectedInReleaseCycleParam);
         if (!StringUtils.isEmpty(detectedInRelease)) {
             final List<String> cycles = getReleaseCycles(issueDetail, client, hcc, domain, project, detectedInRelease);
             ((BugParamChoice) detectedInReleaseCycleParam).setChoiceList(cycles);
 
         }
-        // TODO: targetRelease, targetReleaseCycle, environment
+        final BugParam targetReleaseParam = new BugParamChoice().setHasDependentParams(true).setIdentifier(TARGET_RELEASE_PARAM_NAME).setDisplayLabel("Target Release")
+            .setRequired(false).setDescription("Release in which the issue is targetted to be fixed");
+        bugParams.add(targetReleaseParam);
+        if (!StringUtils.isEmpty(project)) {
+            final List<String> releases = getReleases(issueDetail, client, hcc, domain, project);
+            ((BugParamChoice) targetReleaseParam).setChoiceList(releases);
+        }
+        final BugParam targetReleaseCycleParam = new BugParamChoice().setHasDependentParams(false).setIdentifier(TARGET_CYCLE_PARAM_NAME).setDisplayLabel("Target Release Cycle")
+            .setRequired(false).setDescription("Target Release cycle in which the issue is targetted to be fixed");
+        bugParams.add(targetReleaseCycleParam);
+        if (!StringUtils.isEmpty(targetRelease)) {
+            final List<String> cycles = getReleaseCycles(issueDetail, client, hcc, domain, project, targetRelease);
+            ((BugParamChoice) targetReleaseCycleParam).setChoiceList(cycles);
+
+        }
+        // TODO: environment
         return bugParams;
     }
 
@@ -715,16 +730,16 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
                         BugParam summaryParam = null;
                         BugParam descriptionParam = null;
 
+                        // TODO: check if any of the below are "required" and update the field
                         // ignore any fields we have already added
-                        if (DETECTED_IN_RELEASE_FIELD_NAME.equals(identifier)) {
+                        if (DETECTED_IN_RELEASE_FIELD_NAME.equals(identifier) || TARGET_RELEASE_FIELD_NAME.equals(identifier)) {
                             //LOG.warn("ignoring field as already set: " + identifier);
                             continue;
                         }
-                        if (DETECTED_IN_RELEASE_CYCLE_FIELD_NAME.equals(identifier)) {
+                        if (DETECTED_IN_RELEASE_CYCLE_FIELD_NAME.equals(identifier) || TARGET_CYCLE_FIELD_NAME.equals(identifier)) {
                             //LOG.warn("ignoring field as already set: " + identifier);
                             continue;
                         }
-                        // TBD: target release, target release cycle, environment
 
                         NodeList childNodes = field.getChildNodes();
                         for (int j = 0; j < childNodes.getLength(); j++) {
@@ -812,7 +827,6 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
                                                 + relationsResponse);
                                         throw new BugTrackerException("Could not query references from the ALM server", nested);
                                 }
-                            // subject field does not say its a LookUp list from the API but it is
                             } else if (type.equalsIgnoreCase("lookuplist")) {
                                 HttpGet listQuery = getLookupListQuery(domain, project, listId, ALMApiVersion.VER_11);
                                 Response listresp = runQueryInContext(client, hcc, listQuery);
@@ -888,8 +902,9 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
                     }
                     break;
                 default:
+                    // Note: we can ignore 500 as a result of /qcbin/rest/domains/DEFAULT/projects/LAB_PROJECT/customization/entities/defect/fields
                     RuntimeException nested = new RuntimeException("Got HTTP return code: " + httpReturnCode + "; Response: " + response);
-                    throw new BugTrackerException(String.format("Could not query default bug fields from the ALM server: %s - %s", httpReturnCode, response), nested);
+                    throw new BugTrackerException(String.format("Could not query default bug fields from the ALM server for project %s: %s - %s", project, httpReturnCode, response), nested);
             }
 
         } catch (XPathExpressionException e) {
@@ -1121,7 +1136,7 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
                     detectedInReleaseCycleParam.setChoiceList(getReleaseCycles(issueDetail, client, hcc, domainParam.getValue(), projectParam.getValue(), detectedInReleaseParam.getValue()));
                 }
                 returnParams = getBugParameters(issueDetail, client, hcc, domainParam.getValue(), projectParam.getValue(), 
-                    detectedInReleaseParam.getValue(), (targetReleaseParam != null ? targetReleaseParam.getValue() : null));
+                    (detectedInReleaseParam != null ? detectedInReleaseParam.getValue() : null), (targetReleaseParam != null ? targetReleaseParam.getValue() : null));
                 for (BugParam bugParam : returnParams) {
                     BugParam currentParam = pluginHelper.findParam(bugParam.getIdentifier(), currentValues);
                     if (currentParam != null) {
@@ -1129,7 +1144,26 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
                     }
                 }
             } else if (isTargetReleaseChanged) {
-                // TODO
+                BugParam domainParam = pluginHelper.findParam(DOMAIN_PARAM_NAME, currentValues);
+                BugParamChoice projectParam = (BugParamChoice) pluginHelper.findParam(PROJECT_PARAM_NAME, currentValues);
+                BugParamChoice detectedInReleaseParam = (BugParamChoice) pluginHelper.findParam(DETECTED_IN_RELEASE_PARAM_NAME, currentValues);
+                BugParamChoice targetReleaseParam = (BugParamChoice)pluginHelper.findParam(TARGET_RELEASE_PARAM_NAME, currentValues);
+                BugParamChoice detectedInReleaseCycleParam = (BugParamChoice)pluginHelper.findParam(DETECTED_IN_RELEASE_CYCLE_PARAM_NAME, currentValues);
+                BugParamChoice targetReleaseCycleParam = (BugParamChoice)pluginHelper.findParam(TARGET_CYCLE_PARAM_NAME, currentValues);
+                if (StringUtils.isEmpty(targetReleaseParam.getValue())) {
+                    targetReleaseCycleParam.setChoiceList(Collections.<String>emptyList());
+                } else {
+                    LOG.warn(String.format("Target release changed to: %s, reloading cycles...", targetReleaseParam.getValue()));
+                    targetReleaseCycleParam.setChoiceList(getReleaseCycles(issueDetail, client, hcc, domainParam.getValue(), projectParam.getValue(), targetReleaseParam.getValue()));
+                }
+                returnParams = getBugParameters(issueDetail, client, hcc, domainParam.getValue(), projectParam.getValue(), 
+                    (detectedInReleaseParam != null ? detectedInReleaseParam.getValue() : null), (targetReleaseParam != null ? targetReleaseParam.getValue() : null));
+                for (BugParam bugParam : returnParams) {
+                    BugParam currentParam = pluginHelper.findParam(bugParam.getIdentifier(), currentValues);
+                    if (currentParam != null) {
+                        bugParam.setValue(currentParam.getValue());
+                    }
+                }
             } else if (isEnvironmentChanged) {
                 // TODO
             } else {
@@ -1421,11 +1455,11 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
                 getEntityId(TARGET_RELEASE_PARAM_NAME, bug.getParams().get(TARGET_RELEASE_PARAM_NAME), null, client, hcc, domain, project), 
                 DEFAULT_TRIM_LENGTH));
         }
-        // convert target release cycle name to id
+        // convert target release cycle to id
         if (bug.getParams().get(TARGET_CYCLE_PARAM_NAME) != null && bug.getParams().get(TARGET_CYCLE_PARAM_NAME).length() > 0) {
             fields.getField().add(buildEntityField(TARGET_CYCLE_FIELD_NAME, 
-                getEntityId(TARGET_CYCLE_PARAM_NAME, bug.getParams().get(TARGET_RELEASE_PARAM_NAME), 
-                    bug.getParams().get(TARGET_CYCLE_PARAM_NAME), client, hcc, domain, project), 
+                getEntityId(TARGET_CYCLE_PARAM_NAME, bug.getParams().get(TARGET_CYCLE_PARAM_NAME), 
+                bug.getParams().get(TARGET_RELEASE_PARAM_NAME), client, hcc, domain, project), 
                 DEFAULT_TRIM_LENGTH));
         }
         // convert environment to id
@@ -1456,8 +1490,10 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
         for (String paramName : bug.getParams().keySet()) {
             if (!(paramName.equals(NAME_PARAM_NAME) || paramName.equals(DESCRIPTION_PARAM_NAME) ||
                     paramName.equals(PROJECT_PARAM_NAME) || paramName.equals(DOMAIN_PARAM_NAME) ||
-                    paramName.equals(DETECTED_IN_RELEASE_PARAM_NAME)
-                    || paramName.equals(SEVERITY_PARAM_NAME))) {
+                    paramName.equals(DETECTED_IN_RELEASE_PARAM_NAME) || paramName.equals(DETECTED_IN_RELEASE_CYCLE_PARAM_NAME) || 
+                    paramName.equals(TARGET_RELEASE_PARAM_NAME) || paramName.equals(TARGET_CYCLE_PARAM_NAME) || 
+                    paramName.equals(DETECTED_ON_ENVIRONMENT_PARAM_NAME) ||
+                    paramName.equals(SEVERITY_PARAM_NAME))) {
                 fields.getField().add(buildEntityField(paramName, bug.getParams().get(paramName), DEFAULT_TRIM_LENGTH));
             }
         }
@@ -1950,11 +1986,11 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
                 getEntityId(TARGET_RELEASE_PARAM_NAME, bug.getParams().get(TARGET_RELEASE_PARAM_NAME), null, client, hcc, domain, project), 
                 DEFAULT_TRIM_LENGTH));
         }
-        // convert target release cycle name to id
+        // convert target release cycle to id
         if (bug.getParams().get(TARGET_CYCLE_PARAM_NAME) != null && bug.getParams().get(TARGET_CYCLE_PARAM_NAME).length() > 0) {
             fields.getField().add(buildEntityField(TARGET_CYCLE_FIELD_NAME, 
-                getEntityId(TARGET_CYCLE_PARAM_NAME, bug.getParams().get(TARGET_RELEASE_PARAM_NAME), 
-                bug.getParams().get(TARGET_CYCLE_PARAM_NAME), client, hcc, domain, project), 
+                getEntityId(TARGET_CYCLE_PARAM_NAME, bug.getParams().get(TARGET_CYCLE_PARAM_NAME), 
+                bug.getParams().get(TARGET_RELEASE_PARAM_NAME), client, hcc, domain, project), 
                 DEFAULT_TRIM_LENGTH));
         }
         // convert environment to id
@@ -1988,6 +2024,8 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
             if (!(paramName.equals(NAME_PARAM_NAME) || paramName.equals(DESCRIPTION_PARAM_NAME) ||
                     paramName.equals(PROJECT_PARAM_NAME) || paramName.equals(DOMAIN_PARAM_NAME) ||
                     paramName.equals(DETECTED_IN_RELEASE_PARAM_NAME) || paramName.equals(DETECTED_IN_RELEASE_CYCLE_PARAM_NAME) || 
+                    paramName.equals(TARGET_RELEASE_PARAM_NAME) || paramName.equals(TARGET_CYCLE_PARAM_NAME) || 
+                    paramName.equals(DETECTED_ON_ENVIRONMENT_PARAM_NAME) ||
                     paramName.equals(SEVERITY_PARAM_NAME))) {
                 fields.getField().add(buildEntityField(paramName, bug.getParams().get(paramName), DEFAULT_TRIM_LENGTH));
             }
@@ -2003,7 +2041,7 @@ public class AlmBugTrackerPlugin extends AbstractBatchBugTrackerPlugin implement
         final CloseableHttpClient client, final HttpClientContext hcc,
         final String domain, final String project) {
 
-        LOG.warn(String.format("Retrieving id for entitiy %s:%s, value: %s", (parentValue != null ? parentValue : ""), entityField, entityValue));
+        LOG.warn(String.format("Retrieving id for entitiy %s - %s%s", entityField, (parentValue != null ? ":" + parentValue : ":"), entityValue));
 
         String entityName = "";
         String entityQuery = "";
